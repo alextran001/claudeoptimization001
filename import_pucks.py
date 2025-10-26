@@ -119,6 +119,23 @@ class ControlMain(QtWidgets.QMainWindow):
         self.validation_thread = None
         self.validation_worker = None
 
+    def closeEvent(self, event):
+        """Clean up threads when closing the application"""
+        # Stop and clean up validation thread
+        try:
+            if self.validation_thread is not None and self.validation_thread.isRunning():
+                self.validation_thread.quit()
+                self.validation_thread.wait(2000)  # Wait up to 2 seconds
+        except RuntimeError:
+            pass  # Thread already deleted
+
+        # Stop timer
+        if self.elapsed_timer.isActive():
+            self.elapsed_timer.stop()
+
+        # Accept the close event
+        event.accept()
+
     def validatePuckLists(self):
         pucklist_path = Path(self.config["list_path"])
         if not pucklist_path.exists():
@@ -291,6 +308,17 @@ class ControlMain(QtWidgets.QMainWindow):
         # Reset timer when importing new file
         self._reset_timer()
 
+        # Clean up any existing validation thread
+        try:
+            if self.validation_thread is not None and self.validation_thread.isRunning():
+                self.validation_thread.quit()
+                self.validation_thread.wait(1000)  # Wait up to 1 second
+        except RuntimeError:
+            pass  # Thread already deleted
+
+        self.validation_thread = None
+        self.validation_worker = None
+
         dialog = QtWidgets.QFileDialog()
         if self.config.get("open_in_work_dir", True):
             dialog.setDirectory(os.getcwd())
@@ -368,9 +396,13 @@ class ControlMain(QtWidgets.QMainWindow):
             return
 
         # Don't start validation if already running
-        if self.validation_thread and self.validation_thread.isRunning():
-            self.showModalMessage("Info", "Validation already in progress...")
-            return
+        try:
+            if self.validation_thread is not None and self.validation_thread.isRunning():
+                self.showModalMessage("Info", "Validation already in progress...")
+                return
+        except RuntimeError:
+            # Thread was deleted, reset reference
+            self.validation_thread = None
 
         # Start the timer when validation begins (only if not already started)
         if self.start_time is None:
@@ -392,6 +424,7 @@ class ControlMain(QtWidgets.QMainWindow):
         self.validation_worker.finished.connect(self.validation_thread.quit)
         self.validation_worker.finished.connect(self.validation_worker.deleteLater)
         self.validation_thread.finished.connect(self.validation_thread.deleteLater)
+        self.validation_thread.finished.connect(self._on_validation_thread_finished)
 
         # Start the thread
         self.validation_thread.start()
@@ -401,6 +434,11 @@ class ControlMain(QtWidgets.QMainWindow):
         self.validation_thread.finished.connect(
             lambda: self.validateExcelAction.setEnabled(True)
         )
+
+    def _on_validation_thread_finished(self):
+        """Clean up thread reference when thread is finished and deleted"""
+        self.validation_thread = None
+        self.validation_worker = None
 
     def _on_validation_progress(self, message):
         """Handle progress updates from validation worker"""
