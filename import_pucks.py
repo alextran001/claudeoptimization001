@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from qtpy import QtWidgets
-from qtpy.QtCore import QSize, Qt, QTimer
+from qtpy.QtCore import QSize, Qt, QTimer, QThread, Signal, QObject
 from qtpy.QtGui import QColor, QIcon
 from gui.dialog.dewar import DewarDialog
 
@@ -34,6 +34,39 @@ file_handler.setLevel(logging.INFO)
 class Mode(Enum):
     MANUAL = "Manual"
     AUTOMATED = "Automated"
+
+
+class ValidationWorker(QObject):
+    """Worker thread for validation operations to keep UI responsive"""
+    finished = Signal()
+    success = Signal()
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, model, config):
+        super().__init__()
+        self.model = model
+        self.config = config
+
+    def run(self):
+        """Run validation in background thread"""
+        try:
+            self.progress.emit("Preprocessing data...")
+            self.model.preprocessData()
+
+            self.progress.emit("Validating data...")
+            self.model.validateData(self.config)
+
+            self.progress.emit("Saving initial data...")
+            self.model._dataframe.to_excel("initial_data.xlsx", index=False)
+
+            self.success.emit()
+        except TypeError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"Unexpected error: {str(e)}")
+        finally:
+            self.finished.emit()
 
 
 class ControlMain(QtWidgets.QMainWindow):
@@ -69,17 +102,22 @@ class ControlMain(QtWidgets.QMainWindow):
 
         # Timer setup for monitoring elapsed time
         self.timer_label = QtWidgets.QLabel("Elapsed: 00:00:00")
+        self.timer_label.setMinimumWidth(150)  # Ensure timer has enough space
         self.status_bar.addPermanentWidget(self.timer_label)
         self.start_time = None
-        self.elapsed_timer = QTimer()
+        self.elapsed_timer = QTimer(self)
         self.elapsed_timer.timeout.connect(self._update_timer_display)
-        self.elapsed_timer.setInterval(100)  # Update every 100ms
+        self.elapsed_timer.setInterval(100)  # Update every 100ms for smooth real-time display
 
         # Default mode to start the application
         self._set_mode(Mode.MANUAL)
         self.all_pucks = []
         self.redis_pucklist = []
         self.all_redis_pucks = {}
+
+        # Worker thread setup for background validation
+        self.validation_thread = None
+        self.validation_worker = None
 
     def validatePuckLists(self):
         pucklist_path = Path(self.config["list_path"])
@@ -172,7 +210,7 @@ class ControlMain(QtWidgets.QMainWindow):
             self.owner = getpass.getuser()
 
     def _update_timer_display(self):
-        """Update the elapsed time display in the status bar"""
+        """Update the elapsed time display in the status bar (runs on main thread)"""
         if self.start_time is not None:
             elapsed = datetime.now() - self.start_time
             hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
@@ -180,13 +218,15 @@ class ControlMain(QtWidgets.QMainWindow):
             self.timer_label.setText(f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}")
 
     def _start_timer(self):
-        """Start the elapsed time timer"""
+        """Start the elapsed time timer (runs on main thread)"""
         self.start_time = datetime.now()
-        self.elapsed_timer.start()
+        self.timer_label.setText("Elapsed: 00:00:00")
         self.timer_label.setStyleSheet("color: green; font-weight: bold;")
+        self.elapsed_timer.start()
+        logger.info("Timer started")
 
     def _stop_timer(self):
-        """Stop the elapsed time timer"""
+        """Stop the elapsed time timer (runs on main thread)"""
         self.elapsed_timer.stop()
         if self.start_time is not None:
             elapsed = datetime.now() - self.start_time
@@ -198,7 +238,7 @@ class ControlMain(QtWidgets.QMainWindow):
             logger.info(final_time)
 
     def _reset_timer(self):
-        """Reset the timer display"""
+        """Reset the timer display (runs on main thread)"""
         self.elapsed_timer.stop()
         self.start_time = None
         self.timer_label.setText("Elapsed: 00:00:00")
@@ -327,30 +367,65 @@ class ControlMain(QtWidgets.QMainWindow):
         if not isinstance(self.model, PuckPandasModel):
             return
 
+        # Don't start validation if already running
+        if self.validation_thread and self.validation_thread.isRunning():
+            self.showModalMessage("Info", "Validation already in progress...")
+            return
+
         # Start the timer when validation begins (only if not already started)
         if self.start_time is None:
             self._start_timer()
 
-        try:
-            #processing data from excel model
-            self.model.preprocessData()
-            self.model.validateData(self.config)
-            #TODO REMOVE THIS PRINT, PRINTING HERE FOR DEBUGGING PURPOSES
-            self.model._dataframe.to_excel("initial_data.xlsx", index=False)
-            self.showModalMessage("Success", "Validated excel sucessfully")
+        # Update status bar with progress
+        self.status_bar.showMessage("Starting validation...")
 
-        except TypeError as e:
-            error_msg = str(e)
-            logger.error(f"TypeError: {traceback.format_exc()}")
+        # Create worker thread for validation
+        self.validation_thread = QThread()
+        self.validation_worker = ValidationWorker(self.model, self.config)
+        self.validation_worker.moveToThread(self.validation_thread)
 
-            # Check if this is a "default values filled" warning vs actual error
-            if "Empty Values in following columns" in error_msg or "Missing column headers" in error_msg:
-                # This is a warning about filled defaults - keep timer running
-                self.showModalMessage("Warning", error_msg)
-            else:
-                # This is an actual validation error - reset timer
-                self.showModalMessage("Error", error_msg)
-                self._reset_timer()
+        # Connect signals
+        self.validation_thread.started.connect(self.validation_worker.run)
+        self.validation_worker.progress.connect(self._on_validation_progress)
+        self.validation_worker.success.connect(self._on_validation_success)
+        self.validation_worker.error.connect(self._on_validation_error)
+        self.validation_worker.finished.connect(self.validation_thread.quit)
+        self.validation_worker.finished.connect(self.validation_worker.deleteLater)
+        self.validation_thread.finished.connect(self.validation_thread.deleteLater)
+
+        # Start the thread
+        self.validation_thread.start()
+
+        # Disable validation action while running
+        self.validateExcelAction.setEnabled(False)
+        self.validation_thread.finished.connect(
+            lambda: self.validateExcelAction.setEnabled(True)
+        )
+
+    def _on_validation_progress(self, message):
+        """Handle progress updates from validation worker"""
+        self.status_bar.showMessage(message)
+        logger.info(message)
+
+    def _on_validation_success(self):
+        """Handle successful validation"""
+        self.status_bar.showMessage("Validation completed successfully", 5000)
+        self.showModalMessage("Success", "Validated excel successfully")
+
+    def _on_validation_error(self, error_msg):
+        """Handle validation errors"""
+        logger.error(f"Validation error: {error_msg}")
+
+        # Check if this is a "default values filled" warning vs actual error
+        if "Empty Values in following columns" in error_msg or "Missing column headers" in error_msg:
+            # This is a warning about filled defaults - keep timer running
+            self.status_bar.showMessage("Warning: Default values filled", 5000)
+            self.showModalMessage("Warning", error_msg)
+        else:
+            # This is an actual validation error - reset timer
+            self.status_bar.showMessage("Validation failed", 5000)
+            self.showModalMessage("Error", error_msg)
+            self._reset_timer()
 
     def showModalMessage(self, title, message):
         self.msg = QtWidgets.QMessageBox()
@@ -404,6 +479,11 @@ class ControlMain(QtWidgets.QMainWindow):
             for i, row in enumerate(self.model.rows()):
                 print(f"Processing row {i}")
                 self.progress_dialog.setValue(i + 1)
+
+                # Process events every few rows to update timer and progress
+                if i % 5 == 0:
+                    QtWidgets.QApplication.processEvents()
+
                 if self.progress_dialog.wasCanceled():
                     # Reset timer if user cancels
                     self._reset_timer()
