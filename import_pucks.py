@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from qtpy import QtWidgets
-from qtpy.QtCore import QSize, Qt, QTimer
+from qtpy.QtCore import QSize, Qt, QTimer, QThread, Signal
 from qtpy.QtGui import QColor, QIcon
 from gui.dialog.dewar import DewarDialog
 
@@ -34,6 +34,46 @@ file_handler.setLevel(logging.INFO)
 class Mode(Enum):
     MANUAL = "Manual"
     AUTOMATED = "Automated"
+
+
+class TimerThread(QThread):
+    """Independent timer thread that runs separately from main GUI thread"""
+    time_updated = Signal(str)  # Emits formatted time string
+
+    def __init__(self):
+        super().__init__()
+        self.running = False
+        self.start_time = None
+
+    def run(self):
+        """Run timer in separate thread"""
+        self.running = True
+        while self.running:
+            if self.start_time is not None:
+                elapsed = datetime.now() - self.start_time
+                total_seconds = int(elapsed.total_seconds())
+                hours, remainder = divmod(total_seconds, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                self.time_updated.emit(time_str)
+
+            # Sleep for 100ms
+            self.msleep(100)
+
+    def start_timer(self):
+        """Start the timer"""
+        self.start_time = datetime.now()
+        if not self.isRunning():
+            self.start()
+
+    def stop_timer(self):
+        """Stop the timer thread"""
+        self.running = False
+        self.start_time = None
+
+    def reset_timer(self):
+        """Reset the timer"""
+        self.start_time = None
 
 
 class ControlMain(QtWidgets.QMainWindow):
@@ -67,15 +107,18 @@ class ControlMain(QtWidgets.QMainWindow):
         self.mode_status = QtWidgets.QLabel(f"MODE: {self.mode.value}")
         self.status_bar.addPermanentWidget(self.mode_status)
 
-        # Timer setup for monitoring elapsed time
+        # Timer setup for monitoring elapsed time - using independent thread
         self.timer_label = QtWidgets.QLabel("Elapsed: 00:00:00")
         self.timer_label.setMinimumWidth(150)  # Ensure timer has enough space
         self.status_bar.addPermanentWidget(self.timer_label)
-        self.start_time = None
+
+        # Create independent timer thread
+        self.timer_thread = TimerThread()
+        self.timer_thread.time_updated.connect(self._on_timer_update)
+        self.timer_thread.start()  # Start the thread (timer starts when start_timer() is called)
+
         self.last_printed_second = -1  # Track last printed second to avoid spam
-        self.elapsed_timer = QTimer(self)
-        self.elapsed_timer.timeout.connect(self._update_timer_display)
-        self.elapsed_timer.setInterval(100)  # Update every 100ms for smooth real-time display
+        self.start_time = None  # Keep for compatibility
 
         # Default mode to start the application
         self._set_mode(Mode.MANUAL)
@@ -85,9 +128,11 @@ class ControlMain(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         """Clean up when closing the application"""
-        # Stop timer
-        if self.elapsed_timer.isActive():
-            self.elapsed_timer.stop()
+        # Stop timer thread
+        if self.timer_thread.isRunning():
+            self.timer_thread.stop_timer()
+            self.timer_thread.quit()
+            self.timer_thread.wait(2000)  # Wait up to 2 seconds for thread to finish
 
         # Accept the close event
         event.accept()
@@ -182,34 +227,30 @@ class ControlMain(QtWidgets.QMainWindow):
             self.automatedModeAction.setChecked(False)
             self.owner = getpass.getuser()
 
-    def _update_timer_display(self):
-        """Update the elapsed time display in the status bar (runs on main thread)"""
-        if self.start_time is not None:
-            elapsed = datetime.now() - self.start_time
-            total_seconds = int(elapsed.total_seconds())
-            hours, remainder = divmod(total_seconds, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            self.timer_label.setText(f"Elapsed: {time_str}")
+    def _on_timer_update(self, time_str):
+        """Handle timer update from independent thread (runs on main GUI thread via signal)"""
+        # Update GUI label
+        self.timer_label.setText(f"Elapsed: {time_str}")
 
-            # Print to console every second (not every 100ms to avoid spam)
-            if total_seconds != self.last_printed_second:
-                print(f"⏱️  Elapsed: {time_str}", end='\r', flush=True)
-                self.last_printed_second = total_seconds
+        # Print to console every second (not every 100ms to avoid spam)
+        total_seconds = int(time_str.split(':')[0]) * 3600 + int(time_str.split(':')[1]) * 60 + int(time_str.split(':')[2])
+        if total_seconds != self.last_printed_second:
+            print(f"⏱️  Elapsed: {time_str}", end='\r', flush=True)
+            self.last_printed_second = total_seconds
 
     def _start_timer(self):
-        """Start the elapsed time timer (runs on main thread)"""
+        """Start the elapsed time timer using independent thread"""
         self.start_time = datetime.now()
         self.last_printed_second = -1  # Reset for new timer session
         self.timer_label.setText("Elapsed: 00:00:00")
         self.timer_label.setStyleSheet("color: green; font-weight: bold;")
-        self.elapsed_timer.start()
+        self.timer_thread.start_timer()
         print("\n⏱️  Timer started")
         logger.info("Timer started")
 
     def _stop_timer(self):
-        """Stop the elapsed time timer (runs on main thread)"""
-        self.elapsed_timer.stop()
+        """Stop the elapsed time timer"""
+        self.timer_thread.stop_timer()
         if self.start_time is not None:
             elapsed = datetime.now() - self.start_time
             hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
@@ -219,10 +260,11 @@ class ControlMain(QtWidgets.QMainWindow):
             self.timer_label.setStyleSheet("color: blue; font-weight: bold;")
             print(f"\n✅ {final_time}\n")
             logger.info(final_time)
+            self.start_time = None
 
     def _reset_timer(self):
-        """Reset the timer display (runs on main thread)"""
-        self.elapsed_timer.stop()
+        """Reset the timer display"""
+        self.timer_thread.reset_timer()
         self.start_time = None
         self.last_printed_second = -1
         self.timer_label.setText("Elapsed: 00:00:00")
@@ -368,11 +410,6 @@ class ControlMain(QtWidgets.QMainWindow):
         # Disable validation button during processing
         self.validateExcelAction.setEnabled(False)
 
-        # Create a timer to force GUI updates during long operations
-        force_update_timer = QTimer(self)
-        force_update_timer.timeout.connect(QtWidgets.QApplication.processEvents)
-        force_update_timer.start(50)  # Process events every 50ms
-
         try:
             # Update status bar and process events
             self.status_bar.showMessage("Preprocessing data...")
@@ -415,9 +452,6 @@ class ControlMain(QtWidgets.QMainWindow):
                 self.showModalMessage("Error", error_msg)
                 self._reset_timer()
         finally:
-            # Stop the force update timer
-            force_update_timer.stop()
-            force_update_timer.deleteLater()
             # Re-enable validation button
             self.validateExcelAction.setEnabled(True)
 
@@ -444,11 +478,6 @@ class ControlMain(QtWidgets.QMainWindow):
         # Restart timer for submission process
         self._start_timer()
         self.status_bar.showMessage("Starting puck data upload...")
-
-        # Create a timer to force GUI updates during long operations
-        force_update_timer = QTimer(self)
-        force_update_timer.timeout.connect(QtWidgets.QApplication.processEvents)
-        force_update_timer.start(50)  # Process events every 50ms
 
         try:
             if isinstance(self.model, PuckPandasModel):
@@ -583,10 +612,6 @@ class ControlMain(QtWidgets.QMainWindow):
         except Exception as e:
             logger.error(f"Error during puck data submission: {traceback.format_exc()}")
             self.showModalMessage("Error", f"Failed to upload: {str(e)}")
-        finally:
-            # Stop the force update timer
-            force_update_timer.stop()
-            force_update_timer.deleteLater()
 
 
     def _createMenuBar(self):
