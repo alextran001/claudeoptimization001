@@ -38,12 +38,12 @@ class Mode(Enum):
 
 class TimerThread(QThread):
     """Independent timer thread that runs separately from main GUI thread"""
-    time_updated = Signal(str)  # Emits formatted time string
 
     def __init__(self):
         super().__init__()
         self.running = False
         self.start_time = None
+        self.current_time_str = "00:00:00"  # Shared variable for current time
 
     def run(self):
         """Run timer in separate thread"""
@@ -54,8 +54,8 @@ class TimerThread(QThread):
                 total_seconds = int(elapsed.total_seconds())
                 hours, remainder = divmod(total_seconds, 3600)
                 minutes, seconds = divmod(remainder, 60)
-                time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                self.time_updated.emit(time_str)
+                # Update shared variable (thread-safe for simple assignments)
+                self.current_time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
             # Sleep for 100ms
             self.msleep(100)
@@ -63,6 +63,7 @@ class TimerThread(QThread):
     def start_timer(self):
         """Start the timer"""
         self.start_time = datetime.now()
+        self.current_time_str = "00:00:00"
         if not self.isRunning():
             self.start()
 
@@ -74,6 +75,11 @@ class TimerThread(QThread):
     def reset_timer(self):
         """Reset the timer"""
         self.start_time = None
+        self.current_time_str = "00:00:00"
+
+    def get_current_time(self):
+        """Get current elapsed time string (thread-safe read)"""
+        return self.current_time_str
 
 
 class ControlMain(QtWidgets.QMainWindow):
@@ -112,10 +118,14 @@ class ControlMain(QtWidgets.QMainWindow):
         self.timer_label.setMinimumWidth(150)  # Ensure timer has enough space
         self.status_bar.addPermanentWidget(self.timer_label)
 
-        # Create independent timer thread
+        # Create independent timer thread that calculates elapsed time
         self.timer_thread = TimerThread()
-        self.timer_thread.time_updated.connect(self._on_timer_update)
         self.timer_thread.start()  # Start the thread (timer starts when start_timer() is called)
+
+        # Create a GUI update timer that runs on main thread and forces updates
+        self.gui_update_timer = QTimer(self)
+        self.gui_update_timer.timeout.connect(self._update_timer_from_thread)
+        self.gui_update_timer.setInterval(100)  # Update GUI every 100ms
 
         self.last_printed_second = -1  # Track last printed second to avoid spam
         self.start_time = None  # Keep for compatibility
@@ -128,6 +138,10 @@ class ControlMain(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         """Clean up when closing the application"""
+        # Stop GUI update timer
+        if self.gui_update_timer.isActive():
+            self.gui_update_timer.stop()
+
         # Stop timer thread
         if self.timer_thread.isRunning():
             self.timer_thread.stop_timer()
@@ -227,8 +241,11 @@ class ControlMain(QtWidgets.QMainWindow):
             self.automatedModeAction.setChecked(False)
             self.owner = getpass.getuser()
 
-    def _on_timer_update(self, time_str):
-        """Handle timer update from independent thread (runs on main GUI thread via signal)"""
+    def _update_timer_from_thread(self):
+        """Update GUI from timer thread (runs on main thread, forces processEvents)"""
+        # Get current time from thread
+        time_str = self.timer_thread.get_current_time()
+
         # Update GUI label
         self.timer_label.setText(f"Elapsed: {time_str}")
 
@@ -238,19 +255,33 @@ class ControlMain(QtWidgets.QMainWindow):
             print(f"⏱️  Elapsed: {time_str}", end='\r', flush=True)
             self.last_printed_second = total_seconds
 
+        # Force process events to update GUI immediately
+        QtWidgets.QApplication.processEvents()
+
     def _start_timer(self):
         """Start the elapsed time timer using independent thread"""
         self.start_time = datetime.now()
         self.last_printed_second = -1  # Reset for new timer session
         self.timer_label.setText("Elapsed: 00:00:00")
         self.timer_label.setStyleSheet("color: green; font-weight: bold;")
+
+        # Start the background timer thread
         self.timer_thread.start_timer()
+
+        # Start the GUI update timer to poll the thread and update GUI
+        self.gui_update_timer.start()
+
         print("\n⏱️  Timer started")
         logger.info("Timer started")
 
     def _stop_timer(self):
         """Stop the elapsed time timer"""
+        # Stop GUI update timer
+        self.gui_update_timer.stop()
+
+        # Stop background timer thread
         self.timer_thread.stop_timer()
+
         if self.start_time is not None:
             elapsed = datetime.now() - self.start_time
             hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
@@ -264,7 +295,12 @@ class ControlMain(QtWidgets.QMainWindow):
 
     def _reset_timer(self):
         """Reset the timer display"""
+        # Stop GUI update timer
+        self.gui_update_timer.stop()
+
+        # Reset background timer thread
         self.timer_thread.reset_timer()
+
         self.start_time = None
         self.last_printed_second = -1
         self.timer_label.setText("Elapsed: 00:00:00")
