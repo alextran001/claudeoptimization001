@@ -202,8 +202,8 @@ class PuckPandasModel(BasePandasModel):
 
             
     def validateData(self, config) -> None:
+        self._emit_progress("Starting data validation...")
         self.resetColors()
-        self._emit_progress("Resetting colors...")
 
         #if not self._matchMasterlist(self._dataframe, config):
         #    raise TypeError(
@@ -214,8 +214,12 @@ class PuckPandasModel(BasePandasModel):
 
         '''
 
-        self._emit_progress("Validating sample information...")
-        self._dataframe.apply(self._validate_data)
+        self._emit_progress("Validating sample data...")
+        # Apply validation to each column - emit progress for each column
+        for idx, col_name in enumerate(self._dataframe.columns):
+            if col_name in ['samplename', 'proposalnum']:
+                self._emit_progress(f"Validating {col_name}...")
+                self._validate_data(self._dataframe[col_name])
 
         '''
         if not self._checkSampleNames(self._dataframe):
@@ -291,8 +295,10 @@ class PuckPandasModel(BasePandasModel):
             "cellparameters",
 ]
         required_columns = set(required_columns_list)
+        self._emit_progress("Converting column names to lowercase...")
         self._dataframe.columns = self._dataframe.columns.str.lower()
         columns_absent = None
+        self._emit_progress("Resetting cell colors...")
         self.resetColors()
         self._emit_progress("Processing columns...")
 
@@ -308,6 +314,7 @@ class PuckPandasModel(BasePandasModel):
         '''
         Setting sample information variables
         '''
+        self._emit_progress("Setting sample data types...")
         self._dataframe.loc[:, "position"].astype("Int64", errors="ignore")
 
         self._dataframe.loc[:, "proposalnum"].astype("Int64", errors="ignore")
@@ -318,6 +325,7 @@ class PuckPandasModel(BasePandasModel):
         '''
         setting data collection variables
         '''
+        self._emit_progress("Setting data collection types...")
         self._dataframe.loc[:, "deltaphi"].astype("float" , errors="ignore")
         self._dataframe.loc[:, "exposure"].astype("float" , errors="ignore")
         self._dataframe.loc[:, "totalphi"].astype("float" , errors="ignore")
@@ -333,12 +341,13 @@ class PuckPandasModel(BasePandasModel):
         '''
         setting automation variables
         '''
+        self._emit_progress("Setting automation types...")
         self._dataframe = self._dataframe.astype({"collectiontype": "str"} , errors="ignore")
 
         '''
         setting Data processing variables
         '''
-
+        self._emit_progress("Setting data processing types...")
         self._dataframe = self._dataframe.astype({"spacegroup": "str", "model": "str", "cellparameters": "str"} , errors="ignore")
 
 

@@ -72,6 +72,7 @@ class ControlMain(QtWidgets.QMainWindow):
         self.timer_label.setMinimumWidth(150)  # Ensure timer has enough space
         self.status_bar.addPermanentWidget(self.timer_label)
         self.start_time = None
+        self.last_printed_second = -1  # Track last printed second to avoid spam
         self.elapsed_timer = QTimer(self)
         self.elapsed_timer.timeout.connect(self._update_timer_display)
         self.elapsed_timer.setInterval(100)  # Update every 100ms for smooth real-time display
@@ -185,16 +186,25 @@ class ControlMain(QtWidgets.QMainWindow):
         """Update the elapsed time display in the status bar (runs on main thread)"""
         if self.start_time is not None:
             elapsed = datetime.now() - self.start_time
-            hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
+            total_seconds = int(elapsed.total_seconds())
+            hours, remainder = divmod(total_seconds, 3600)
             minutes, seconds = divmod(remainder, 60)
-            self.timer_label.setText(f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}")
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            self.timer_label.setText(f"Elapsed: {time_str}")
+
+            # Print to console every second (not every 100ms to avoid spam)
+            if total_seconds != self.last_printed_second:
+                print(f"⏱️  Elapsed: {time_str}", end='\r', flush=True)
+                self.last_printed_second = total_seconds
 
     def _start_timer(self):
         """Start the elapsed time timer (runs on main thread)"""
         self.start_time = datetime.now()
+        self.last_printed_second = -1  # Reset for new timer session
         self.timer_label.setText("Elapsed: 00:00:00")
         self.timer_label.setStyleSheet("color: green; font-weight: bold;")
         self.elapsed_timer.start()
+        print("\n⏱️  Timer started")
         logger.info("Timer started")
 
     def _stop_timer(self):
@@ -207,14 +217,17 @@ class ControlMain(QtWidgets.QMainWindow):
             final_time = f"Completed in: {hours:02d}:{minutes:02d}:{seconds:02d}"
             self.timer_label.setText(final_time)
             self.timer_label.setStyleSheet("color: blue; font-weight: bold;")
+            print(f"\n✅ {final_time}\n")
             logger.info(final_time)
 
     def _reset_timer(self):
         """Reset the timer display (runs on main thread)"""
         self.elapsed_timer.stop()
         self.start_time = None
+        self.last_printed_second = -1
         self.timer_label.setText("Elapsed: 00:00:00")
         self.timer_label.setStyleSheet("")
+        print("\n🔄 Timer reset\n")
 
     def setupDewarScan(self):
         empty_frame = {None: [""]}
@@ -355,6 +368,11 @@ class ControlMain(QtWidgets.QMainWindow):
         # Disable validation button during processing
         self.validateExcelAction.setEnabled(False)
 
+        # Create a timer to force GUI updates during long operations
+        force_update_timer = QTimer(self)
+        force_update_timer.timeout.connect(QtWidgets.QApplication.processEvents)
+        force_update_timer.start(50)  # Process events every 50ms
+
         try:
             # Update status bar and process events
             self.status_bar.showMessage("Preprocessing data...")
@@ -397,6 +415,9 @@ class ControlMain(QtWidgets.QMainWindow):
                 self.showModalMessage("Error", error_msg)
                 self._reset_timer()
         finally:
+            # Stop the force update timer
+            force_update_timer.stop()
+            force_update_timer.deleteLater()
             # Re-enable validation button
             self.validateExcelAction.setEnabled(True)
 
@@ -424,9 +445,15 @@ class ControlMain(QtWidgets.QMainWindow):
         self._start_timer()
         self.status_bar.showMessage("Starting puck data upload...")
 
-        if isinstance(self.model, PuckPandasModel):
-            beamline_id = self.config.get("beamline", "99id1").lower()
-            dbConnection = DBConnection(
+        # Create a timer to force GUI updates during long operations
+        force_update_timer = QTimer(self)
+        force_update_timer.timeout.connect(QtWidgets.QApplication.processEvents)
+        force_update_timer.start(50)  # Process events every 50ms
+
+        try:
+            if isinstance(self.model, PuckPandasModel):
+                beamline_id = self.config.get("beamline", "99id1").lower()
+                dbConnection = DBConnection(
                 beamline_id=beamline_id,
                 #host=self.config.get(
                 #    "database_host", os.environ.get("MONGODB_HOST", "localhost")
@@ -553,8 +580,13 @@ class ControlMain(QtWidgets.QMainWindow):
                 10000
             )
             logger.info(f"Successfully uploaded {len(self.all_redis_pucks)} pucks with {self.model.rowCount()} samples")
-        else:
-            self.showModalMessage("Error", "Invalid data, will not upload to database")
+        except Exception as e:
+            logger.error(f"Error during puck data submission: {traceback.format_exc()}")
+            self.showModalMessage("Error", f"Failed to upload: {str(e)}")
+        finally:
+            # Stop the force update timer
+            force_update_timer.stop()
+            force_update_timer.deleteLater()
 
 
     def _createMenuBar(self):
