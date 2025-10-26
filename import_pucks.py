@@ -409,6 +409,8 @@ class ControlMain(QtWidgets.QMainWindow):
 
     def _on_validation_success(self):
         """Handle successful validation"""
+        # Stop timer when validation completes
+        self._stop_timer()
         self.status_bar.showMessage("Validation completed successfully", 5000)
         self.showModalMessage("Success", "Validated excel successfully")
 
@@ -445,6 +447,10 @@ class ControlMain(QtWidgets.QMainWindow):
             self.showModalMessage("Error", "Data not validated, will not upload. Please validate first.")
             self._reset_timer()
             return
+
+        # Restart timer for submission process
+        self._start_timer()
+        self.status_bar.showMessage("Starting puck data upload...")
 
         if isinstance(self.model, PuckPandasModel):
             beamline_id = self.config.get("beamline", "99id1").lower()
@@ -570,6 +576,10 @@ class ControlMain(QtWidgets.QMainWindow):
 
             # Stop timer on successful completion
             self._stop_timer()
+            self.status_bar.showMessage(
+                f"Upload complete! {len(self.all_redis_pucks)} pucks with {self.model.rowCount()} samples",
+                10000
+            )
             logger.info(f"Successfully uploaded {len(self.all_redis_pucks)} pucks with {self.model.rowCount()} samples")
         else:
             self.showModalMessage("Error", "Invalid data, will not upload to database")
