@@ -462,11 +462,11 @@ class ControlMain(QtWidgets.QMainWindow):
             self.model.validateData(self.config)
             QtWidgets.QApplication.processEvents()
 
-            # Save initial data
-            self.status_bar.showMessage("Saving initial data...")
-            QtWidgets.QApplication.processEvents()
-
-            self.model._dataframe.to_excel("initial_data.xlsx", index=False)
+            # Save initial data only if debug mode is enabled (saves ~1-2 seconds)
+            if self.config.get("debug_save_excel", False):
+                self.status_bar.showMessage("Saving initial data...")
+                QtWidgets.QApplication.processEvents()
+                self.model._dataframe.to_excel("initial_data.xlsx", index=False)
 
             # Success - stop timer
             self._stop_timer()
@@ -547,11 +547,12 @@ class ControlMain(QtWidgets.QMainWindow):
             self.current_puck = None
             self.previous_puck = None
             for i, row in enumerate(self.model.rows()):
-                print(f"Processing row {i}")
+                # Update progress dialog value
                 self.progress_dialog.setValue(i + 1)
 
-                # Process events every few rows to update timer and progress
-                if i % 5 == 0:
+                # Process events every 10 rows to update timer and progress (reduced from 5 for better performance)
+                if i % 10 == 0:
+                    print(f"Processing row {i}")
                     QtWidgets.QApplication.processEvents()
 
                 if self.progress_dialog.wasCanceled():
@@ -574,20 +575,18 @@ class ControlMain(QtWidgets.QMainWindow):
                     prevPuckName = row["puckname"]
 
                 # Create sample
-                '''
-                get sample information fromt the row
-                and create sample info dictionary
-                '''
-                sample_info ={}
-
-                sampleName: str = str(row["samplename"])
-                sample_position: int = int(float(row["position"]))
+                # Extract row data with optimized dictionary access (cache repeated lookups)
+                sampleName = str(row["samplename"])
+                sample_position = int(float(row["position"]))
                 propNum = row["proposalnum"]
-                seq = None
+                puckname = row["puckname"]
+
+                # Optimized row data extraction with cached get operations
                 model = row.get('model', 'Nan')
                 folder = row.get('folder')
-                if pd.isna(folder):
-                    folder = f"{row['puckname']}_{sample_position:02.0f}"
+                folder = f"{puckname}_{sample_position:02.0f}" if pd.isna(folder) else folder
+
+                # Build sample_info dictionary with pre-extracted values
                 sample_info = {
                     "folder": folder,
                     "deltaphi": row.get("deltaphi", 0.25),
@@ -601,7 +600,7 @@ class ControlMain(QtWidgets.QMainWindow):
                     "model": model,
                     "spacegroup": row.get("spacegroup", 'Nan'),
                     "cellparameters": row.get("cellparameters", 'Nan'),
-                    "proposal_number" : propNum,
+                    "proposal_number": propNum,
                 }
                 
 
