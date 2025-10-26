@@ -145,8 +145,21 @@ class BasePandasModel(QAbstractTableModel):
 class PuckPandasModel(BasePandasModel):
     """A model to interface a Qt view with pandas dataframe"""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.progress_callback = None  # Callback for progress updates
+
     def setPuckLists(self, pucklist):
         self.puckList = pucklist
+
+    def setProgressCallback(self, callback):
+        """Set a callback function for progress updates during validation"""
+        self.progress_callback = callback
+
+    def _emit_progress(self, message=""):
+        """Emit progress update if callback is set"""
+        if self.progress_callback:
+            self.progress_callback(message)
 
     def flags(self, index):
         return (
@@ -190,15 +203,18 @@ class PuckPandasModel(BasePandasModel):
             
     def validateData(self, config) -> None:
         self.resetColors()
+        self._emit_progress("Resetting colors...")
+
         #if not self._matchMasterlist(self._dataframe, config):
         #    raise TypeError(
         #        "Pucks submitted do not match master list. Pucks not in whitelist or etched list are in yellow. Pucks in blacklist are in red"
         #    )
         '''
         sample information checkers
-        
+
         '''
 
+        self._emit_progress("Validating sample information...")
         self._dataframe.apply(self._validate_data)
 
         '''
@@ -254,6 +270,8 @@ class PuckPandasModel(BasePandasModel):
     def preprocessData(self) -> None:
         # Note all column names are lowercase, good for comparison
         #IN NYX IMPORTER ADDING ALL THE COLUMNS THAT ARE REQUIRED
+        self._emit_progress("Setting up required columns...")
+
         required_columns_list = [
             "puckname",
             "position",
@@ -276,6 +294,7 @@ class PuckPandasModel(BasePandasModel):
         self._dataframe.columns = self._dataframe.columns.str.lower()
         columns_absent = None
         self.resetColors()
+        self._emit_progress("Processing columns...")
 
         # Change current dataframe to only have required columns
         if not required_columns.issubset(self._dataframe.columns):
@@ -327,10 +346,12 @@ class PuckPandasModel(BasePandasModel):
 
         # Remove all whitespaces from string columns (vectorized for performance)
         # Convert all columns to string type first
+        self._emit_progress("Converting columns to string type...")
         string_cols = list(required_columns)
         self._dataframe[string_cols] = self._dataframe[string_cols].astype("string")
 
         # Vectorized string replacement for non-samplename columns
+        self._emit_progress("Cleaning whitespace from data...")
         non_sample_cols = [col for col in string_cols if col != "samplename"]
         if non_sample_cols:
             self._dataframe[non_sample_cols] = self._dataframe[non_sample_cols].apply(
@@ -355,6 +376,7 @@ class PuckPandasModel(BasePandasModel):
         Filling empty values with defaults
         '''
 
+        self._emit_progress("Filling empty values with defaults...")
         if not self._fill_data_collection_values(self._dataframe):
             absent_columns = "transmission, targetresolution, beamsize, collectiontype, spacegroup, model, cellparameters"
             raise TypeError(

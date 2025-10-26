@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from qtpy import QtWidgets
-from qtpy.QtCore import QSize, Qt, QTimer, QThread, Signal, QObject
+from qtpy.QtCore import QSize, Qt, QTimer
 from qtpy.QtGui import QColor, QIcon
 from gui.dialog.dewar import DewarDialog
 
@@ -34,39 +34,6 @@ file_handler.setLevel(logging.INFO)
 class Mode(Enum):
     MANUAL = "Manual"
     AUTOMATED = "Automated"
-
-
-class ValidationWorker(QObject):
-    """Worker thread for validation operations to keep UI responsive"""
-    finished = Signal()
-    success = Signal()
-    error = Signal(str)
-    progress = Signal(str)
-
-    def __init__(self, model, config):
-        super().__init__()
-        self.model = model
-        self.config = config
-
-    def run(self):
-        """Run validation in background thread"""
-        try:
-            self.progress.emit("Preprocessing data...")
-            self.model.preprocessData()
-
-            self.progress.emit("Validating data...")
-            self.model.validateData(self.config)
-
-            self.progress.emit("Saving initial data...")
-            self.model._dataframe.to_excel("initial_data.xlsx", index=False)
-
-            self.success.emit()
-        except TypeError as e:
-            self.error.emit(str(e))
-        except Exception as e:
-            self.error.emit(f"Unexpected error: {str(e)}")
-        finally:
-            self.finished.emit()
 
 
 class ControlMain(QtWidgets.QMainWindow):
@@ -115,20 +82,8 @@ class ControlMain(QtWidgets.QMainWindow):
         self.redis_pucklist = []
         self.all_redis_pucks = {}
 
-        # Worker thread setup for background validation
-        self.validation_thread = None
-        self.validation_worker = None
-
     def closeEvent(self, event):
-        """Clean up threads when closing the application"""
-        # Stop and clean up validation thread
-        try:
-            if self.validation_thread is not None and self.validation_thread.isRunning():
-                self.validation_thread.quit()
-                self.validation_thread.wait(2000)  # Wait up to 2 seconds
-        except RuntimeError:
-            pass  # Thread already deleted
-
+        """Clean up when closing the application"""
         # Stop timer
         if self.elapsed_timer.isActive():
             self.elapsed_timer.stop()
@@ -308,17 +263,6 @@ class ControlMain(QtWidgets.QMainWindow):
         # Reset timer when importing new file
         self._reset_timer()
 
-        # Clean up any existing validation thread
-        try:
-            if self.validation_thread is not None and self.validation_thread.isRunning():
-                self.validation_thread.quit()
-                self.validation_thread.wait(1000)  # Wait up to 1 second
-        except RuntimeError:
-            pass  # Thread already deleted
-
-        self.validation_thread = None
-        self.validation_worker = None
-
         dialog = QtWidgets.QFileDialog()
         if self.config.get("open_in_work_dir", True):
             dialog.setDirectory(os.getcwd())
@@ -390,82 +334,72 @@ class ControlMain(QtWidgets.QMainWindow):
                     break
             self.tableView.resizeColumnsToContents()
 
+    def _validation_progress_callback(self, message=""):
+        """Callback for validation progress - updates UI and processes events"""
+        if message:
+            self.status_bar.showMessage(message)
+        QtWidgets.QApplication.processEvents()
+
     def validateExcel(self):
 
         if not isinstance(self.model, PuckPandasModel):
             return
 
-        # Don't start validation if already running
-        try:
-            if self.validation_thread is not None and self.validation_thread.isRunning():
-                self.showModalMessage("Info", "Validation already in progress...")
-                return
-        except RuntimeError:
-            # Thread was deleted, reset reference
-            self.validation_thread = None
-
         # Start the timer when validation begins (only if not already started)
         if self.start_time is None:
             self._start_timer()
 
-        # Update status bar with progress
-        self.status_bar.showMessage("Starting validation...")
+        # Set progress callback so model can update timer
+        self.model.setProgressCallback(self._validation_progress_callback)
 
-        # Create worker thread for validation
-        self.validation_thread = QThread()
-        self.validation_worker = ValidationWorker(self.model, self.config)
-        self.validation_worker.moveToThread(self.validation_thread)
-
-        # Connect signals
-        self.validation_thread.started.connect(self.validation_worker.run)
-        self.validation_worker.progress.connect(self._on_validation_progress)
-        self.validation_worker.success.connect(self._on_validation_success)
-        self.validation_worker.error.connect(self._on_validation_error)
-        self.validation_worker.finished.connect(self.validation_thread.quit)
-        self.validation_worker.finished.connect(self.validation_worker.deleteLater)
-        self.validation_thread.finished.connect(self.validation_thread.deleteLater)
-        self.validation_thread.finished.connect(self._on_validation_thread_finished)
-
-        # Start the thread
-        self.validation_thread.start()
-
-        # Disable validation action while running
+        # Disable validation button during processing
         self.validateExcelAction.setEnabled(False)
-        self.validation_thread.finished.connect(
-            lambda: self.validateExcelAction.setEnabled(True)
-        )
 
-    def _on_validation_thread_finished(self):
-        """Clean up thread reference when thread is finished and deleted"""
-        self.validation_thread = None
-        self.validation_worker = None
+        try:
+            # Update status bar and process events
+            self.status_bar.showMessage("Preprocessing data...")
+            QtWidgets.QApplication.processEvents()
 
-    def _on_validation_progress(self, message):
-        """Handle progress updates from validation worker"""
-        self.status_bar.showMessage(message)
-        logger.info(message)
+            # Preprocess data
+            self.model.preprocessData()
+            QtWidgets.QApplication.processEvents()
 
-    def _on_validation_success(self):
-        """Handle successful validation"""
-        # Stop timer when validation completes
-        self._stop_timer()
-        self.status_bar.showMessage("Validation completed successfully", 5000)
-        self.showModalMessage("Success", "Validated excel successfully")
+            # Validate data
+            self.status_bar.showMessage("Validating data...")
+            QtWidgets.QApplication.processEvents()
 
-    def _on_validation_error(self, error_msg):
-        """Handle validation errors"""
-        logger.error(f"Validation error: {error_msg}")
+            self.model.validateData(self.config)
+            QtWidgets.QApplication.processEvents()
 
-        # Check if this is a "default values filled" warning vs actual error
-        if "Empty Values in following columns" in error_msg or "Missing column headers" in error_msg:
-            # This is a warning about filled defaults - keep timer running
-            self.status_bar.showMessage("Warning: Default values filled", 5000)
-            self.showModalMessage("Warning", error_msg)
-        else:
-            # This is an actual validation error - reset timer
-            self.status_bar.showMessage("Validation failed", 5000)
-            self.showModalMessage("Error", error_msg)
-            self._reset_timer()
+            # Save initial data
+            self.status_bar.showMessage("Saving initial data...")
+            QtWidgets.QApplication.processEvents()
+
+            self.model._dataframe.to_excel("initial_data.xlsx", index=False)
+
+            # Success - stop timer
+            self._stop_timer()
+            self.status_bar.showMessage("Validation completed successfully", 5000)
+            self.showModalMessage("Success", "Validated excel successfully")
+
+        except TypeError as e:
+            error_msg = str(e)
+            logger.error(f"TypeError: {traceback.format_exc()}")
+
+            # Check if this is a "default values filled" warning vs actual error
+            if "Empty Values in following columns" in error_msg or "Missing column headers" in error_msg:
+                # This is a warning about filled defaults - keep timer running
+                self.status_bar.showMessage("Warning: Default values filled", 5000)
+                self.showModalMessage("Warning", error_msg)
+            else:
+                # This is an actual validation error - reset timer
+                self.status_bar.showMessage("Validation failed", 5000)
+                self.showModalMessage("Error", error_msg)
+                self._reset_timer()
+        finally:
+            # Re-enable validation button
+            self.validateExcelAction.setEnabled(True)
+
 
     def showModalMessage(self, title, message):
         self.msg = QtWidgets.QMessageBox()
