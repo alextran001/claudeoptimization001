@@ -109,21 +109,28 @@ class BasePandasModel(QAbstractTableModel):
             self.colors[(idx, column_index)] = color
 
         # Emit dataChanged signals in batches for better performance
-        if row_indices:
+        if len(row_indices) > 0:
             min_row = min(row_indices)
             max_row = max(row_indices)
             top_left = self.index(min_row, column_index)
             bottom_right = self.index(max_row, column_index)
             self.dataChanged.emit(top_left, bottom_right, (Qt.ItemDataRole.BackgroundRole,))
     
-    def _changeCellData(self, column_index: int, row_indices, value=None) -> None:
+    def _changeCellData(self, column, row_indices, value=None) -> None:
         # Batch data changes for better performance
-        column_name = self._dataframe.columns[column_index]
+        # column can be either column name (string) or column index (int)
+        if isinstance(column, int):
+            column_name = self._dataframe.columns[column]
+            column_index = column
+        else:
+            column_name = column
+            column_index = self._dataframe.columns.get_loc(column)
+
         for idx in row_indices:
             self._dataframe.at[idx, column_name] = value
 
         # Emit dataChanged signals in batches
-        if row_indices:
+        if len(row_indices) > 0:
             min_row = min(row_indices)
             max_row = max(row_indices)
             top_left = self.index(min_row, column_index)

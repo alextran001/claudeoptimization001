@@ -229,9 +229,11 @@ class ControlMain(QtWidgets.QMainWindow):
                     continue
 
                 # Check if any row besides header row contains "puckname" (optimized)
-                # Use applymap for pandas < 2.1.0, map for >= 2.1.0
-                rows = (data.applymap(lambda x: str(x).lower() == required_columns_list[0]) if hasattr(data, 'applymap')
-                        else data.map(lambda x: str(x).lower() == required_columns_list[0])).any(axis=1)
+                # Use map for pandas >= 2.1.0, applymap for older versions
+                try:
+                    rows = data.map(lambda x: str(x).lower() == required_columns_list[0]).any(axis=1)
+                except AttributeError:
+                    rows = data.applymap(lambda x: str(x).lower() == required_columns_list[0]).any(axis=1)
 
                 required_columns = set(required_columns_list)
                 header_correct = required_columns.issubset(
