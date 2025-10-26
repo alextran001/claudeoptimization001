@@ -48,6 +48,10 @@ class ControlMain(QtWidgets.QMainWindow):
             )
             raise e
         self.config = config
+        # Cache admin group check for performance (must be before _createMenuBar)
+        self._is_admin = self.config.get("admin_group") and self.config["admin_group"] in [
+            grp.getgrgid(g).gr_name for g in os.getgroups()
+        ]
         super().__init__(*args, **kwargs)
         self.setWindowTitle(f"Import Pucks at {self.config.get('beamline', '99id1')}")
         self.tableView = self._createTableView()
@@ -66,10 +70,6 @@ class ControlMain(QtWidgets.QMainWindow):
         self.all_pucks = []
         self.redis_pucklist = []
         self.all_redis_pucks = {}
-        # Cache admin group check for performance
-        self._is_admin = self.config["admin_group"] in [
-            grp.getgrgid(g).gr_name for g in os.getgroups()
-        ]
 
     def validatePuckLists(self):
         pucklist_path = Path(self.config["list_path"])
