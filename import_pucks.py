@@ -9,12 +9,13 @@ import traceback
 from enum import Enum
 from pathlib import Path
 from typing import Tuple
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import yaml
 from qtpy import QtWidgets
-from qtpy.QtCore import QSize, Qt
+from qtpy.QtCore import QSize, Qt, QTimer
 from qtpy.QtGui import QColor, QIcon
 from gui.dialog.dewar import DewarDialog
 
@@ -65,6 +66,15 @@ class ControlMain(QtWidgets.QMainWindow):
         self.status_bar = self.statusBar()
         self.mode_status = QtWidgets.QLabel(f"MODE: {self.mode.value}")
         self.status_bar.addPermanentWidget(self.mode_status)
+
+        # Timer setup for monitoring elapsed time
+        self.timer_label = QtWidgets.QLabel("Elapsed: 00:00:00")
+        self.status_bar.addPermanentWidget(self.timer_label)
+        self.start_time = None
+        self.elapsed_timer = QTimer()
+        self.elapsed_timer.timeout.connect(self._update_timer_display)
+        self.elapsed_timer.setInterval(100)  # Update every 100ms
+
         # Default mode to start the application
         self._set_mode(Mode.MANUAL)
         self.all_pucks = []
@@ -161,6 +171,39 @@ class ControlMain(QtWidgets.QMainWindow):
             self.automatedModeAction.setChecked(False)
             self.owner = getpass.getuser()
 
+    def _update_timer_display(self):
+        """Update the elapsed time display in the status bar"""
+        if self.start_time is not None:
+            elapsed = datetime.now() - self.start_time
+            hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            self.timer_label.setText(f"Elapsed: {hours:02d}:{minutes:02d}:{seconds:02d}")
+
+    def _start_timer(self):
+        """Start the elapsed time timer"""
+        self.start_time = datetime.now()
+        self.elapsed_timer.start()
+        self.timer_label.setStyleSheet("color: green; font-weight: bold;")
+
+    def _stop_timer(self):
+        """Stop the elapsed time timer"""
+        self.elapsed_timer.stop()
+        if self.start_time is not None:
+            elapsed = datetime.now() - self.start_time
+            hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            final_time = f"Completed in: {hours:02d}:{minutes:02d}:{seconds:02d}"
+            self.timer_label.setText(final_time)
+            self.timer_label.setStyleSheet("color: blue; font-weight: bold;")
+            logger.info(final_time)
+
+    def _reset_timer(self):
+        """Reset the timer display"""
+        self.elapsed_timer.stop()
+        self.start_time = None
+        self.timer_label.setText("Elapsed: 00:00:00")
+        self.timer_label.setStyleSheet("")
+
     def setupDewarScan(self):
         empty_frame = {None: [""]}
         data = pd.DataFrame.from_dict(empty_frame)
@@ -205,6 +248,9 @@ class ControlMain(QtWidgets.QMainWindow):
             return None
 
     def importExcel(self):
+        # Reset timer when importing new file
+        self._reset_timer()
+
         dialog = QtWidgets.QFileDialog()
         if self.config.get("open_in_work_dir", True):
             dialog.setDirectory(os.getcwd())
@@ -277,9 +323,13 @@ class ControlMain(QtWidgets.QMainWindow):
             self.tableView.resizeColumnsToContents()
 
     def validateExcel(self):
-        
+
         if not isinstance(self.model, PuckPandasModel):
             return
+
+        # Start the timer when validation begins
+        self._start_timer()
+
         try:
             #processing data from excel model
             self.model.preprocessData()
@@ -291,6 +341,8 @@ class ControlMain(QtWidgets.QMainWindow):
         except TypeError as e:
             logger.error(f"TypeError: {traceback.format_exc()}")
             self.showModalMessage("Error", e)
+            # Reset timer on error
+            self._reset_timer()
 
     def showModalMessage(self, title, message):
         self.msg = QtWidgets.QMessageBox()
@@ -303,10 +355,12 @@ class ControlMain(QtWidgets.QMainWindow):
         # Validation already done in validateExcel(), skip redundant calls
         if not isinstance(self.model, PuckPandasModel):
             self.showModalMessage("Error", "Invalid data, will not upload to database")
+            self._reset_timer()
             return
 
         if not self.model.validData:
             self.showModalMessage("Error", "Data not validated, will not upload. Please validate first.")
+            self._reset_timer()
             return
 
         if isinstance(self.model, PuckPandasModel):
@@ -343,6 +397,9 @@ class ControlMain(QtWidgets.QMainWindow):
                 print(f"Processing row {i}")
                 self.progress_dialog.setValue(i + 1)
                 if self.progress_dialog.wasCanceled():
+                    # Reset timer if user cancels
+                    self._reset_timer()
+                    logger.info("Upload cancelled by user")
                     break
                 # Check if puck exists, otherwise create one
                 if row["puckname"] != prevPuckName:
@@ -422,6 +479,10 @@ class ControlMain(QtWidgets.QMainWindow):
             #print(self.all_pucks)
             #dbConnection.sendToRedis('allpuckData', self.all_pucks)
             dbConnection.sendToRedis('redis_puck_data', self.all_redis_pucks)
+
+            # Stop timer on successful completion
+            self._stop_timer()
+            logger.info(f"Successfully uploaded {len(self.all_redis_pucks)} pucks with {self.model.rowCount()} samples")
         else:
             self.showModalMessage("Error", "Invalid data, will not upload to database")
 
