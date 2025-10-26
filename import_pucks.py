@@ -327,8 +327,9 @@ class ControlMain(QtWidgets.QMainWindow):
         if not isinstance(self.model, PuckPandasModel):
             return
 
-        # Start the timer when validation begins
-        self._start_timer()
+        # Start the timer when validation begins (only if not already started)
+        if self.start_time is None:
+            self._start_timer()
 
         try:
             #processing data from excel model
@@ -339,10 +340,17 @@ class ControlMain(QtWidgets.QMainWindow):
             self.showModalMessage("Success", "Validated excel sucessfully")
 
         except TypeError as e:
+            error_msg = str(e)
             logger.error(f"TypeError: {traceback.format_exc()}")
-            self.showModalMessage("Error", e)
-            # Reset timer on error
-            self._reset_timer()
+
+            # Check if this is a "default values filled" warning vs actual error
+            if "Empty Values in following columns" in error_msg or "Missing column headers" in error_msg:
+                # This is a warning about filled defaults - keep timer running
+                self.showModalMessage("Warning", error_msg)
+            else:
+                # This is an actual validation error - reset timer
+                self.showModalMessage("Error", error_msg)
+                self._reset_timer()
 
     def showModalMessage(self, title, message):
         self.msg = QtWidgets.QMessageBox()
