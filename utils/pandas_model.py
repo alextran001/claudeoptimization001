@@ -61,8 +61,10 @@ class BasePandasModel(QAbstractTableModel):
         return None
 
     def rows(self):
-        for i, row in self._dataframe.iterrows():
-            yield row
+        # Use itertuples for much better performance (100x faster than iterrows)
+        for row in self._dataframe.itertuples(index=True):
+            # Convert namedtuple to dict for backward compatibility
+            yield row._asdict()
 
     def setData(self, index: QModelIndex, value: typing.Any, role: int = ...) -> bool:
         if role == Qt.ItemDataRole.EditRole:
@@ -102,12 +104,31 @@ class BasePandasModel(QAbstractTableModel):
     def _changeCellColors(
         self, column_index: int, row_indices, color=QColor(Qt.GlobalColor.red)
     ) -> None:
+        # Batch color changes to reduce signal emissions
         for idx in row_indices:
-            self.changeColor(idx, column_index, color)
+            self.colors[(idx, column_index)] = color
+
+        # Emit dataChanged signals in batches for better performance
+        if row_indices:
+            min_row = min(row_indices)
+            max_row = max(row_indices)
+            top_left = self.index(min_row, column_index)
+            bottom_right = self.index(max_row, column_index)
+            self.dataChanged.emit(top_left, bottom_right, (Qt.ItemDataRole.BackgroundRole,))
     
     def _changeCellData(self, column_index: int, row_indices, value=None) -> None:
+        # Batch data changes for better performance
+        column_name = self._dataframe.columns[column_index]
         for idx in row_indices:
-            self.changeValue(idx, column_index, value)
+            self._dataframe.at[idx, column_name] = value
+
+        # Emit dataChanged signals in batches
+        if row_indices:
+            min_row = min(row_indices)
+            max_row = max(row_indices)
+            top_left = self.index(min_row, column_index)
+            bottom_right = self.index(max_row, column_index)
+            self.dataChanged.emit(top_left, bottom_right)
     
     def changeValue(self, row: int, column: int, value) -> None:
         #self._dataframe.at[row, column] = self._dataframe.at[row, column].astype("object")
@@ -297,13 +318,23 @@ class PuckPandasModel(BasePandasModel):
 
         self._dataframe = self._dataframe[required_columns_list]
 
-        # Remove all whitespaces from string columns
-        for col in required_columns:
-            self._dataframe[col] = self._dataframe[col].astype("string")
-            if col != "samplename":
-                self._dataframe[col] = self._dataframe[col].str.replace(r"\s+", "", regex=True)
-            else:
-                self._dataframe[col] = self._dataframe[col].str.replace(r"(\.|\s)+", "", regex=True)
+        # Remove all whitespaces from string columns (vectorized for performance)
+        # Convert all columns to string type first
+        string_cols = list(required_columns)
+        self._dataframe[string_cols] = self._dataframe[string_cols].astype("string")
+
+        # Vectorized string replacement for non-samplename columns
+        non_sample_cols = [col for col in string_cols if col != "samplename"]
+        if non_sample_cols:
+            self._dataframe[non_sample_cols] = self._dataframe[non_sample_cols].apply(
+                lambda x: x.str.replace(r"\s+", "", regex=True)
+            )
+
+        # Special handling for samplename column
+        if "samplename" in string_cols:
+            self._dataframe["samplename"] = self._dataframe["samplename"].str.replace(
+                r"(\.|\s)+", "", regex=True
+            )
 
         if columns_absent:
             raise TypeError(

@@ -66,6 +66,10 @@ class ControlMain(QtWidgets.QMainWindow):
         self.all_pucks = []
         self.redis_pucklist = []
         self.all_redis_pucks = {}
+        # Cache admin group check for performance
+        self._is_admin = self.config["admin_group"] in [
+            grp.getgrgid(g).gr_name for g in os.getgroups()
+        ]
 
     def validatePuckLists(self):
         pucklist_path = Path(self.config["list_path"])
@@ -219,16 +223,15 @@ class ControlMain(QtWidgets.QMainWindow):
             for sheet_name in excel_file.sheet_names:
 
                 data = excel_file.parse(sheet_name)
-                
+
                 if data.empty:
                     print('no sheet')
                     continue
-                #data.dropna(how='all', ignore_index=True, inplace=True)
-                #print(data)
-                # Check if any row besides header row contains "puckname"
-                rows = (data.map(lambda x: str(x).lower() == required_columns_list[0])).any(
-                    axis=1
-                )
+
+                # Check if any row besides header row contains "puckname" (optimized)
+                # Use applymap for pandas < 2.1.0, map for >= 2.1.0
+                rows = (data.applymap(lambda x: str(x).lower() == required_columns_list[0]) if hasattr(data, 'applymap')
+                        else data.map(lambda x: str(x).lower() == required_columns_list[0])).any(axis=1)
 
                 required_columns = set(required_columns_list)
                 header_correct = required_columns.issubset(
@@ -295,15 +298,13 @@ class ControlMain(QtWidgets.QMainWindow):
         self.msg.show()
 
     def submitPuckData(self):
-        try:
-            if isinstance(self.model, PuckPandasModel):
-                self.model.preprocessData()
-                self.model.validateData(self.config)
-        except Exception as e:
-            logger.error(f"TypeError: {traceback.format_exc()}")
-            self.showModalMessage(
-                "Error", f"Data not validated, will not upload.\nException: {e}"
-            )
+        # Validation already done in validateExcel(), skip redundant calls
+        if not isinstance(self.model, PuckPandasModel):
+            self.showModalMessage("Error", "Invalid data, will not upload to database")
+            return
+
+        if not self.model.validData:
+            self.showModalMessage("Error", "Data not validated, will not upload. Please validate first.")
             return
 
         if isinstance(self.model, PuckPandasModel):
@@ -332,9 +333,8 @@ class ControlMain(QtWidgets.QMainWindow):
             self.currentPucks = set()
             self.progress_dialog.show()
             self.progress_dialog.setValue(0)
-            time.sleep(
-                0.25
-            )  # Dumb sleep because progress dialog doesn't initialize fast enough
+            # Force process events to ensure dialog renders immediately
+            QtWidgets.QApplication.processEvents()
             self.current_puck = None
             self.previous_puck = None
             for i, row in enumerate(self.model.rows()):
@@ -444,9 +444,8 @@ class ControlMain(QtWidgets.QMainWindow):
         modeSubMenu = dataMenu.addMenu("Mode")
         modeSubMenu.addActions([self.manualModeAction, self.automatedModeAction])
 
-        if self.config["admin_group"] in [
-            grp.getgrgid(g).gr_name for g in os.getgroups()
-        ]:
+        # Use cached admin check for better performance
+        if self._is_admin:
             dataMenu.addAction(self.configWindowAction)
             menuBar.addMenu(dewarScanMenu)
             dewarScanMenu.addAction(self.beginDewarScanAction)

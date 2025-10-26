@@ -45,14 +45,21 @@ class RedisConnection:
     {name}:1 ... {name}:x
     '''
     def createRedisContainer(self, capacity: int, name: str = 'NyxDewar', **kwargs):
+        # Use Redis pipeline for batch operations (much faster)
+        pipe = self.client.pipeline()
+
         self.container = {f'{name}:capacity': capacity}
         for i in range(1, capacity+1):
             self.container[i] = 'empty'
-            self.client.set(f"{name}:{i}", json.dumps("empty"))
-        self.client.set(f'{name}:capacity', json.dumps(capacity))
+            pipe.set(f"{name}:{i}", json.dumps("empty"))
+
+        pipe.set(f'{name}:capacity', json.dumps(capacity))
+        pipe.delete(f"{name}:pucks")  # empty pucks from new container
+
+        # Execute all operations at once
+        pipe.execute()
+
         self.main_container_capacity = capacity
-        #empty pucks from new container
-        self.client.delete(f"{name}:pucks")
 
 
     '''
@@ -76,11 +83,14 @@ class RedisConnection:
     {dewarname}:{puckname}:1 ... {dewarname}:{puckname}:x -> list of samples as hashsets
     '''
     def addPuckToMain(self, puck, position: int):
+        # Use Redis pipeline for batch operations (much faster)
+        pipe = self.client.pipeline()
 
         #check if puck is empty and delete all values
         if self.container[position] != 'empty':
             delete_puck = f"{self.main_container}:{self.container[position]}*"
             self.client.delete(*self.client.keys(delete_puck))
+
         puckname = puck['name']
         proposalnum = puck['proposal_number']
         size = len(puck['pins'])
@@ -88,26 +98,28 @@ class RedisConnection:
         pins = puck['pins']
         self.container['pucks'].add(puckname)
         self.container[position] = puckname
-        self.client.set(f"{self.main_container}:{position}", json.dumps(puckname))
-        
-        #adding puck to container pucklist
-        self.client.sadd(f"{self.main_container}:pucks", json.dumps(puckname))
-        #setting everything about puck (for info purposes)
-        self.client.set(f"{self.main_container}:{puckname}", json.dumps(f'All keys for puck:\npins, proposal_number, bitmap, 1...{size}'))
-        #setting puck proposal number
-        self.client.set(f"{self.main_container}:{puckname}:proposal_number", json.dumps(proposalnum))
+
+        # Batch all SET operations in pipeline
+        pipe.set(f"{self.main_container}:{position}", json.dumps(puckname))
+        pipe.sadd(f"{self.main_container}:pucks", json.dumps(puckname))
+        pipe.set(f"{self.main_container}:{puckname}", json.dumps(f'All keys for puck:\npins, proposal_number, bitmap, 1...{size}'))
+        pipe.set(f"{self.main_container}:{puckname}:proposal_number", json.dumps(proposalnum))
+
         #setting puck bitmap and pins
         pin_count = 1
         for bit in bitmap:
-            #setting bitmap
-            self.client.setbit(f'{self.main_container}:{puckname}:bitmap', pin_count, bit)
+            pipe.setbit(f'{self.main_container}:{puckname}:bitmap', pin_count, bit)
             if bit == 1:
-                #if pins are present add to redis
                 pinname = puck[pin_count]['name']
-                self.client.sadd(f'{self.main_container}:{puckname}:pins', json.dumps(pinname))
-                self.client.set(f'{self.main_container}:{puckname}:{pin_count}', json.dumps(pinname))
-                self.client.hset(f'{self.main_container}:{puckname}:{pinname}', mapping=puck[pin_count])
+                pipe.sadd(f'{self.main_container}:{puckname}:pins', json.dumps(pinname))
+                pipe.set(f'{self.main_container}:{puckname}:{pin_count}', json.dumps(pinname))
+                pipe.hset(f'{self.main_container}:{puckname}:{pinname}', mapping=puck[pin_count])
             pin_count += 1
+
+        # Execute all operations at once
+        pipe.execute()
+
+        # Publish after batch operations complete
         self.client.publish(f"{self.main_container}:{position}:pub", json.dumps(puckname))
 
     def removePuckFromMain(self, position: int):
