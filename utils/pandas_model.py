@@ -34,6 +34,14 @@ from qtpy.QtWidgets import QTableView
 
 from utils.collection_request import CollectionRequest
 
+# Optional parallel validation for large datasets
+try:
+    from utils.parallel_validation import ParallelValidator
+    PARALLEL_AVAILABLE = True
+except ImportError:
+    PARALLEL_AVAILABLE = False
+    ParallelValidator = None
+
 # Pre-compile regex patterns once at module level for performance (5-10x faster)
 REGEX_WHITESPACE = re.compile(r"\s+")
 REGEX_SAMPLE_CLEAN = re.compile(r"(\.|\s)+")
@@ -185,12 +193,26 @@ class BasePandasModel(QAbstractTableModel):
 class PuckPandasModel(BasePandasModel):
     """A model to interface a Qt view with pandas dataframe"""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, use_parallel=False, **kwargs):
+        """
+        Initialize PuckPandasModel.
+
+        Args:
+            use_parallel: Enable parallel validation for large datasets (default: False)
+                         Only beneficial for datasets with 5000+ rows
+        """
         super().__init__(*args, **kwargs)
         self.progress_callback = None  # Callback for progress updates
         self._validation_cache = {}  # Cache validation results
         self._dataframe_hash = None  # Track if dataframe changed
         self._column_index_cache = {}  # Cache column index lookups for performance
+
+        # Initialize parallel validator if requested and available
+        self.use_parallel = use_parallel and PARALLEL_AVAILABLE
+        self.parallel_validator = ParallelValidator() if self.use_parallel else None
+
+        if use_parallel and not PARALLEL_AVAILABLE:
+            print("Warning: Parallel validation requested but module not available")
 
     def setPuckLists(self, pucklist):
         self.puckList = pucklist
