@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python test_parallel_speed.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
