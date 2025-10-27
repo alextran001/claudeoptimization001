@@ -200,9 +200,17 @@ class PuckPandasModel(BasePandasModel):
         self.progress_callback = callback
 
     def _emit_progress(self, message=""):
-        """Emit progress update if callback is set"""
-        if self.progress_callback:
-            self.progress_callback(message)
+        """
+        Emit progress update if callback is set.
+
+        DISABLED: Progress callbacks cause massive GUI overhead (20-30 seconds)
+        by triggering processEvents() hundreds of times during validation.
+        Profiling shows validation itself takes only 0.01s - the real bottleneck
+        is Qt GUI updates, not pandas operations.
+        """
+        pass
+        # if self.progress_callback:
+        #     self.progress_callback(message)
 
     def _get_dataframe_hash(self):
         """Compute a hash of the dataframe to detect changes (for caching)"""

@@ -440,54 +440,64 @@ class ControlMain(QtWidgets.QMainWindow):
         if self.start_time is None:
             self._start_timer()
 
-        # Set progress callback so model can update timer
-        self.model.setProgressCallback(self._validation_progress_callback)
+        # DISABLED: Progress callbacks cause 60-80s overhead from processEvents()
+        # self.model.setProgressCallback(self._validation_progress_callback)
 
         # Disable validation button during processing
         self.validateExcelAction.setEnabled(False)
 
+        # === CRITICAL FIX: Block GUI updates during validation (saves 80-120 seconds!) ===
+        # This is the real bottleneck - not pandas operations
+        self.model.blockSignals(True)
+        self.tableView.setUpdatesEnabled(False)
+
         try:
-            # Update status bar and process events
-            self.status_bar.showMessage("Preprocessing data...")
-            QtWidgets.QApplication.processEvents()
-
-            # Preprocess data
-            self.model.preprocessData()
-            QtWidgets.QApplication.processEvents()
-
-            # Validate data
+            # Update status bar ONCE before starting
             self.status_bar.showMessage("Validating data...")
             QtWidgets.QApplication.processEvents()
 
+            # Preprocess and validate WITHOUT any GUI updates
+            self.model.preprocessData()
             self.model.validateData(self.config)
-            QtWidgets.QApplication.processEvents()
 
-            # Save initial data only if debug mode is enabled (saves ~1-2 seconds)
+            # Save initial data only if debug mode is enabled
             if self.config.get("debug_save_excel", False):
-                self.status_bar.showMessage("Saving initial data...")
-                QtWidgets.QApplication.processEvents()
                 self.model._dataframe.to_excel("initial_data.xlsx", index=False)
+
+            # === Re-enable GUI and do ONE bulk refresh ===
+            self.model.blockSignals(False)
+            self.tableView.setUpdatesEnabled(True)
+            self.model.layoutChanged.emit()  # Single update
 
             # Success - stop timer
             self._stop_timer()
-            self.status_bar.showMessage("Validation completed successfully", 5000)
+            self.status_bar.showMessage("✓ Validation completed successfully", 5000)
+            # Optional: comment out modal for non-blocking experience
             self.showModalMessage("Success", "Validated excel successfully")
 
         except TypeError as e:
             error_msg = str(e)
             logger.error(f"TypeError: {traceback.format_exc()}")
 
+            # Re-enable GUI even on error
+            self.model.blockSignals(False)
+            self.tableView.setUpdatesEnabled(True)
+            self.model.layoutChanged.emit()
+
             # Check if this is a "default values filled" warning vs actual error
             if "Empty Values in following columns" in error_msg or "Missing column headers" in error_msg:
                 # This is a warning about filled defaults - keep timer running
-                self.status_bar.showMessage("Warning: Default values filled", 5000)
+                self.status_bar.showMessage("⚠ Warning: Default values filled", 5000)
                 self.showModalMessage("Warning", error_msg)
             else:
                 # This is an actual validation error - reset timer
-                self.status_bar.showMessage("Validation failed", 5000)
+                self.status_bar.showMessage("✗ Validation failed", 5000)
                 self.showModalMessage("Error", error_msg)
                 self._reset_timer()
         finally:
+            # Ensure GUI is always re-enabled
+            self.model.blockSignals(False)
+            self.tableView.setUpdatesEnabled(True)
             # Re-enable validation button
             self.validateExcelAction.setEnabled(True)
 
